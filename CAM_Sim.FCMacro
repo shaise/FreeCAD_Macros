@@ -1,0 +1,173 @@
+import Path
+from FreeCAD import Vector
+from PathScripts.PathGeom import PathGeom
+from PySide import QtGui, QtCore
+
+#for cmd in obj.Path.Commands:
+#	if cmd.Name[0] == 'G':
+#		e1 = 
+#	print cmd.Name
+
+def TSError(msg):	
+    QtGui.QMessageBox.information(None,"Path Simulation",msg)
+
+class PathSimulation:
+    def __init__(self):
+        self.timer = QtCore.QTimer()
+        QtCore.QObject.connect(self.timer, QtCore.SIGNAL("timeout()"), self.PerformCut)
+        self.stdrot = FreeCAD.Rotation(FreeCAD.Vector(0,0,1),0)
+        # setup interaction dialog
+        self.dialog = QtGui.QDockWidget()
+        self.PlayButt = QtGui.QPushButton(self.dialog)
+        self.PlayButt.setText("Play")
+        self.PlayButt.move(50,5)
+        self.PlayButt.clicked.connect(self.PlayAnimation)
+        self.StepButt = QtGui.QPushButton(self.dialog)
+        self.StepButt.setText("Step")
+        self.StepButt.move(50,35)
+        self.StepButt.clicked.connect(self.PerformCut)
+        self.SkipButt = QtGui.QPushButton(self.dialog)
+        self.SkipButt.setText("Skip")
+        self.SkipButt.move(50,65)
+        self.SkipButt.clicked.connect(self.SkipStep)
+        self.dialog.setWindowTitle("CAM Simulation")
+        Gui.getMainWindow().addDockWidget(QtCore.Qt.RightDockWidgetArea, self.dialog)
+        self.dialog.setFloating(True)
+        self.dialog.hide()
+    
+    def SimulateMill(self):
+        sel = Gui.Selection.getSelectionEx()
+        job = None
+        if len(sel) == 1:
+            sel = sel[0]
+            job = sel.Object
+        if job == None or not hasattr(job, "Path") or not hasattr(job, "ToolController") or not hasattr(job, "Stock"):
+            return TSError("Please first select a Path Job")
+        if job.Stock == None:
+            return TSError("Please configure a stock for the path Job")
+        self.job = job
+        self.stock = job.Stock.Shape
+        self.curpos = Vector(0, 0, self.stock.BoundBox.ZMax)
+        self.tool = job.ToolController[0].Tool
+        self.busy = False
+        #self.timer.start(100)
+        self.icmd = 0
+        self.height = 10
+        self.skipStep = False
+        # Add cut tool
+        self.cutTool = FreeCAD.ActiveDocument.addObject("Part::FeaturePython","CutTool")
+        self.cutTool.Shape = Part.makeCylinder(self.tool.Diameter / 2.0, self.height, Vector(0,0,0))
+        self.cutTool.Placement = FreeCAD.Placement(self.curpos, self.stdrot)
+        self.cutTool.ViewObject.Proxy = 0
+        self.cutTool.ViewObject.show()
+        # Add cut material
+        self.cutMaterial = FreeCAD.ActiveDocument.addObject("Part::FeaturePython","CutMaterial")
+        self.cutMaterial.Shape = self.stock
+        self.cutMaterial.ViewObject.Proxy = 0
+        self.cutMaterial.ViewObject.show()
+        # Add cut path solid for debug
+        self.debug = False
+        if self.debug:
+            self.cutSolid = FreeCAD.ActiveDocument.addObject("Part::FeaturePython","CutDebug")
+            self.cutSolid.Shape = self.stock
+            self.cutSolid.ViewObject.Proxy = 0
+            self.cutSolid.ViewObject.hide()
+        
+        FreeCAD.ActiveDocument.recompute()
+        self.dialog.show()
+
+    def SkipStep(self):
+        self.skipStep = True
+        self.PerformCut()
+
+    def PerformCut(self):
+        if self.busy:
+            return
+        self.busy = True
+        cmd = self.job.Path.Commands[self.icmd]
+        #for cmd in job.Path.Commands:
+        pathSolid = None
+        if cmd.Name in ['G0']:
+            self.curpos = self.RapidMove(cmd, self.curpos)
+        if cmd.Name in ['G1', 'G2', 'G3']:
+            if self.skipStep:
+                self.curpos = self.RapidMove(cmd, self.curpos)
+            else:
+                (pathSolid, self.curpos) = self.GetPathSolid(self.tool, cmd, self.curpos)
+        self.skipStep = False
+        if pathSolid is not None:
+            if self.debug:
+                self.cutSolid.Shape = pathSolid
+            self.stock = self.stock.cut(pathSolid).removeSplitter()
+        self.cutTool.Placement = FreeCAD.Placement(self.curpos, self.stdrot)
+        self.icmd = self.icmd + 1
+        if self.icmd >= len(self.job.Path.Commands):
+            #self.cutMaterial.Shape = self.stock.removeSplitter()
+            self.timer.stop()
+            self.dialog.hide()
+        else:
+            self.cutMaterial.Shape = self.stock
+        self.busy = False
+    
+    def RapidMove(self, cmd, curpos):
+        path = PathGeom.edgeForCmd(cmd, curpos) # hack to overcome occ bug
+        if path is None:
+            return curpos
+        return path.valueAt(path.LastParameter)
+    
+    def GetPathSolid(self, tool, cmd, curpos):
+        e1 = PathGeom.edgeForCmd(cmd, curpos)
+        #curpos = e1.valueAt(e1.LastParameter)
+        n1 = e1.tangentAt(0)
+        n1[2] = 0.0
+        try:
+            n1.normalize()
+        except:
+            return (None, e1.valueAt(e1.LastParameter))
+        height = self.height
+        rad = tool.Diameter / 2.0 - 0.001 * curpos[2]
+        if type(e1.Curve) is Part.Circle and e1.Curve.Radius <= rad: # hack to overcome occ bug
+            rad = e1.Curve.Radius - 0.001
+            #return (None, e1.valueAt(e1.LastParameter))
+        xf = n1[0] * rad
+        yf = n1[1] * rad
+        xp = curpos[0]
+        yp = curpos[1]
+        zp = curpos[2]
+        v1 = Vector(yf + xp, -xf + yp, zp)
+        v2 = Vector(yf + xp, -xf + yp, zp + height)
+        v3 = Vector(-yf + xp, xf + yp, zp + height)
+        v4 = Vector(-yf + xp, xf + yp, zp)
+        vc1 = Vector(xf + xp, yf + yp, zp)
+        vc2 = Vector(xf + xp, yf + yp, zp + height)
+        l1 = Part.makeLine(v1, v2)
+        l2 = Part.makeLine(v2, v3)
+        #l2 = Part.Edge(Part.Arc(v2, vc2, v3))
+        l3 = Part.makeLine(v3, v4)
+        l4 = Part.makeLine(v4, v1)
+        #l4 = Part.Edge(Part.Arc(v4, vc1, v1))
+        w1 = Part.Wire([l1, l2, l3, l4])
+        w2 = Part.Wire(e1)
+        try:
+            ex1 = w2.makePipeShell([w1],True, True)
+        except:
+            #Part.show(w1)
+            #Part.show(w2)
+            return (None, e1.valueAt(e1.LastParameter))
+        cyl1 = Part.makeCylinder(rad, height, curpos)
+        curpos = e1.valueAt(e1.LastParameter)
+        cyl2 = Part.makeCylinder(rad, height, curpos)
+        ex1s = Part.Solid(ex1)
+        f1 = ex1s.fuse([cyl1,cyl2]).removeSplitter()
+        return (f1, curpos)
+
+    def PlayAnimation(self):
+        if self.PlayButt.text() == "Pause":
+            self.PlayButt.setText("Play")
+            self.timer.stop()
+        else:
+            self.PlayButt.setText("Pause")
+            self.timer.start(100)
+
+simul = PathSimulation()
+simul.SimulateMill()
