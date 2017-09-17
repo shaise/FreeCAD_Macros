@@ -49,17 +49,14 @@ class PathSimulation:
             return TSError("Please configure a stock for the path Job")
         self.job = job
         self.stock = job.Stock.Shape
-        self.curpos = Vector(0, 0, self.stock.BoundBox.ZMax)
-        self.tool = job.ToolController[0].Tool
         self.busy = False
         #self.timer.start(100)
-        self.icmd = 0
+        self.ioperation = 0
         self.height = 10
         self.skipStep = False
         # Add cut tool
         self.cutTool = FreeCAD.ActiveDocument.addObject("Part::FeaturePython","CutTool")
-        toolProf = self.CreateToolProfile(self.tool, Vector(0,1,0), Vector(0,0,0), self.tool.Diameter / 2.0)
-        self.cutTool.Shape = Part.makeSolid(toolProf.revolve(Vector(0,0,0), Vector(0,0,1)))
+        self.UpdateOperation(0)
         self.cutTool.Placement = FreeCAD.Placement(self.curpos, self.stdrot)
         self.cutTool.ViewObject.Proxy = 0
         self.cutTool.ViewObject.show()
@@ -82,11 +79,20 @@ class PathSimulation:
         self.skipStep = True
         self.PerformCut()
 
+    def UpdateOperation(self, itool):
+        self.operation = job.Operations.OutList[itool]
+        self.tool = self.operation.ToolController.Tool
+        toolProf = self.CreateToolProfile(self.tool, Vector(0,1,0), Vector(0,0,0), self.tool.Diameter / 2.0)
+        self.cutTool.Shape = Part.makeSolid(toolProf.revolve(Vector(0,0,0), Vector(0,0,1)))
+        self.icmd = 0
+        self.curpos = Vector(0, 0, self.stock.BoundBox.ZMax)
+       
+
     def PerformCut(self):
         if self.busy:
             return
         self.busy = True
-        cmd = self.job.Path.Commands[self.icmd]
+        cmd = self.operation.Path.Commands[self.icmd]
         #for cmd in job.Path.Commands:
         pathSolid = None
         if cmd.Name in ['G0']:
@@ -109,12 +115,17 @@ class PathSimulation:
                     print "invalid cut at cmd #" + str(self.icmd)
         self.cutTool.Placement = FreeCAD.Placement(self.curpos, self.stdrot)
         self.icmd = self.icmd + 1
-        if self.icmd >= len(self.job.Path.Commands):
+        if self.icmd >= len(self.operation.Path.Commands):
             #self.cutMaterial.Shape = self.stock.removeSplitter()
-            self.timer.stop()
-            self.dialog.hide()
-        else:
-            self.cutMaterial.Shape = self.stock
+            self.ioperation = self.ioperation + 1
+            if self.ioperation >= len(self.job.OutList):
+                self.timer.stop()
+                self.dialog.hide()
+                self.busy = False
+                return
+            else:
+                self.UpdateOperation(self.ioperation)
+        self.cutMaterial.Shape = self.stock
         self.busy = False
     
     def RapidMove(self, cmd, curpos):
