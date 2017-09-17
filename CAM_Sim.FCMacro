@@ -14,7 +14,7 @@ def TSError(msg):
 
 class PathSimulation:
     def __init__(self):
-        self.debug = True
+        self.debug = False
         self.timer = QtCore.QTimer()
         QtCore.QObject.connect(self.timer, QtCore.SIGNAL("timeout()"), self.PerformCut)
         self.stdrot = FreeCAD.Rotation(Vector(0,0,1),0)
@@ -101,8 +101,12 @@ class PathSimulation:
             if self.debug:
                 self.cutSolid.Shape = pathSolid
             newStock = self.stock.cut(pathSolid)
-            if newStock.isValid():
-                self.stock = newStock.removeSplitter()
+            try:
+                if newStock.isValid():
+                    self.stock = newStock.removeSplitter()
+            except:
+                if self.debug:
+                    print "invalid cut at cmd #" + str(self.icmd)
         self.cutTool.Placement = FreeCAD.Placement(self.curpos, self.stdrot)
         self.icmd = self.icmd + 1
         if self.icmd >= len(self.job.Path.Commands):
@@ -244,17 +248,24 @@ class PathSimulation:
             lB = Part.makeLine(vBC, vBR)
             res = Part.Wire([lB, lR, lT])
 
-        elif type == "BallEndMill_NA":
+        elif type == "BallEndMill":
             h1 = rad
             if h1 >= h:
                 h1 = h - 0.1
             vBR = Vector(xp + yf, yp - xf, zp + h1)
+            r2 = h1 / 2.0
+            h2 = rad - math.sqrt(rad * rad - r2 * r2)
+            vBCR = Vector(xp + yf / 2.0, yp - xf / 2.0, zp + h2)
+            cB = Part.Edge(Part.Arc(vBC, vBCR, vBR))
+            lR = Part.makeLine(vBR, vTR)
+            res = Part.Wire([cB, lR, lT])
 
         else: # default: assume type == "EndMill"
             vBR = Vector(xp + yf, yp - xf, zp)
             lR = Part.makeLine(vBR, vTR)
             lB = Part.makeLine(vBC, vBR)
             res = Part.Wire([lB, lR, lT])
+
         return res
         
 
