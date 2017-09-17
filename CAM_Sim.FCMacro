@@ -1,5 +1,6 @@
 import Path
-from FreeCAD import Vector
+import math
+from FreeCAD import Vector, Base
 from PathScripts.PathGeom import PathGeom
 from PySide import QtGui, QtCore
 
@@ -13,9 +14,10 @@ def TSError(msg):
 
 class PathSimulation:
     def __init__(self):
+        self.debug = True
         self.timer = QtCore.QTimer()
         QtCore.QObject.connect(self.timer, QtCore.SIGNAL("timeout()"), self.PerformCut)
-        self.stdrot = FreeCAD.Rotation(FreeCAD.Vector(0,0,1),0)
+        self.stdrot = FreeCAD.Rotation(Vector(0,0,1),0)
         # setup interaction dialog
         self.dialog = QtGui.QDockWidget()
         self.PlayButt = QtGui.QPushButton(self.dialog)
@@ -56,7 +58,8 @@ class PathSimulation:
         self.skipStep = False
         # Add cut tool
         self.cutTool = FreeCAD.ActiveDocument.addObject("Part::FeaturePython","CutTool")
-        self.cutTool.Shape = Part.makeCylinder(self.tool.Diameter / 2.0, self.height, Vector(0,0,0))
+        toolProf = self.CreateToolProfile(self.tool, Vector(0,1,0), Vector(0,0,0), self.tool.Diameter / 2.0)
+        self.cutTool.Shape = Part.makeSolid(toolProf.revolve(Vector(0,0,0), Vector(0,0,1)))
         self.cutTool.Placement = FreeCAD.Placement(self.curpos, self.stdrot)
         self.cutTool.ViewObject.Proxy = 0
         self.cutTool.ViewObject.show()
@@ -66,7 +69,6 @@ class PathSimulation:
         self.cutMaterial.ViewObject.Proxy = 0
         self.cutMaterial.ViewObject.show()
         # Add cut path solid for debug
-        self.debug = False
         if self.debug:
             self.cutSolid = FreeCAD.ActiveDocument.addObject("Part::FeaturePython","CutDebug")
             self.cutSolid.Shape = self.stock
@@ -98,7 +100,9 @@ class PathSimulation:
         if pathSolid is not None:
             if self.debug:
                 self.cutSolid.Shape = pathSolid
-            self.stock = self.stock.cut(pathSolid).removeSplitter()
+            newStock = self.stock.cut(pathSolid)
+            if newStock.isValid():
+                self.stock = newStock.removeSplitter()
         self.cutTool.Placement = FreeCAD.Placement(self.curpos, self.stdrot)
         self.icmd = self.icmd + 1
         if self.icmd >= len(self.job.Path.Commands):
@@ -115,7 +119,7 @@ class PathSimulation:
             return curpos
         return path.valueAt(path.LastParameter)
     
-    def GetPathSolid(self, tool, cmd, curpos):
+    def GetPathSolidOld(self, tool, cmd, curpos):
         e1 = PathGeom.edgeForCmd(cmd, curpos)
         #curpos = e1.valueAt(e1.LastParameter)
         n1 = e1.tangentAt(0)
@@ -125,7 +129,7 @@ class PathSimulation:
         except:
             return (None, e1.valueAt(e1.LastParameter))
         height = self.height
-        rad = tool.Diameter / 2.0 - 0.001 * curpos[2]
+        rad = tool.Diameter / 2.0 - 0.001 * curpos[2] # hack to overcome occ bug
         if type(e1.Curve) is Part.Circle and e1.Curve.Radius <= rad: # hack to overcome occ bug
             rad = e1.Curve.Radius - 0.001
             #return (None, e1.valueAt(e1.LastParameter))
@@ -160,6 +164,99 @@ class PathSimulation:
         ex1s = Part.Solid(ex1)
         f1 = ex1s.fuse([cyl1,cyl2]).removeSplitter()
         return (f1, curpos)
+    
+    # get a solid representation of a tool going along path
+    def GetPathSolid(self, tool, cmd, pos):
+        toolPath = PathGeom.edgeForCmd(cmd, pos)
+        #curpos = e1.valueAt(e1.LastParameter)
+        startDir = toolPath.tangentAt(0)
+        startDir[2] = 0.0
+        endPos = toolPath.valueAt(toolPath.LastParameter)
+        endDir = toolPath.tangentAt(toolPath.LastParameter)
+        try:
+            startDir.normalize()
+            endDir.normalize()
+        except:
+            return (None, endPos)
+        height = self.height
+
+        # hack to overcome occ bugs
+        rad = tool.Diameter / 2.0 - 0.001 * pos[2]
+        #rad = rad + 0.001 * self.icmd
+        if type(toolPath.Curve) is Part.Circle and toolPath.Curve.Radius <= rad:
+            rad = toolPath.Curve.Radius - 0.01 * (pos[2] + 1)
+            return (None, endPos)
+
+        # create the path shell
+        toolProf = self.CreateToolProfile(tool, startDir, pos, rad)
+        rotmat = Base.Matrix()
+        rotmat.move(pos.negative())
+        rotmat.rotateZ(math.pi)
+        rotmat.move(pos)
+        mirroredProf = toolProf.transformGeometry(rotmat)
+        fullProf = Part.Wire([toolProf, mirroredProf])
+        pathWire = Part.Wire(toolPath)
+        try:
+            pathShell = pathWire.makePipeShell([fullProf],False, True)
+        except:
+            if self.debug:
+                Part.show(pathWire)
+                Part.show(fullProf)
+            return (None, endPos)
+
+        # create the start cup
+        startCup = toolProf.revolve(pos, Vector(0,0,1), -180)
+
+        #create the end cup
+        endProf = self.CreateToolProfile(tool, endDir, endPos, rad)
+        endCup = endProf.revolve(endPos, Vector(0,0,1), 180)
+
+        fullShell = Part.makeShell(startCup.Faces + pathShell.Faces + endCup.Faces)
+        return (Part.makeSolid(fullShell).removeSplitter(), endPos)
+
+    # create radial profile of the tool (90 degrees to the direction of the path)
+    def CreateToolProfile(self, tool, dir, pos, rad):
+        type = tool.ToolType
+        #rad = tool.Diameter / 2.0 - 0.001 * pos[2] # hack to overcome occ bug
+        xf = dir[0] * rad
+        yf = dir[1] * rad
+        xp = pos[0]
+        yp = pos[1]
+        zp = pos[2]
+        h = tool.CuttingEdgeHeight
+        # common to all tools
+        vTR = Vector(xp + yf, yp - xf, zp + h)
+        vTC = Vector(xp, yp, zp + h)
+        vBC = Vector(xp, yp, zp)
+        lT = Part.makeLine(vTR, vTC)
+        res = None
+        if type == "ChamferMill":
+            ang = 90 - tool.CuttingEdgeAngle / 2.0
+            if ang > 80:
+                ang = 80
+            if ang < 0:
+                ang = 0
+            h1 = math.tan(ang * math.pi / 180) * rad
+            if h1 > (h - 0.1):
+                h1 = h - 0.1
+            vBR = Vector(xp + yf, yp - xf, zp + h1)
+            lR = Part.makeLine(vBR, vTR)
+            lB = Part.makeLine(vBC, vBR)
+            res = Part.Wire([lB, lR, lT])
+
+        elif type == "BallEndMill_NA":
+            h1 = rad
+            if h1 >= h:
+                h1 = h - 0.1
+            vBR = Vector(xp + yf, yp - xf, zp + h1)
+
+        else: # default: assume type == "EndMill"
+            vBR = Vector(xp + yf, yp - xf, zp)
+            lR = Part.makeLine(vBR, vTR)
+            lB = Part.makeLine(vBC, vBR)
+            res = Part.Wire([lB, lR, lT])
+        return res
+        
 
     def PlayAnimation(self):
         if self.PlayButt.text() == "Pause":
