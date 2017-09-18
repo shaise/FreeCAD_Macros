@@ -80,7 +80,7 @@ class PathSimulation:
         self.PerformCut()
 
     def UpdateOperation(self, itool):
-        self.operation = job.Operations.OutList[itool]
+        self.operation = self.job.Operations.OutList[itool]
         self.tool = self.operation.ToolController.Tool
         toolProf = self.CreateToolProfile(self.tool, Vector(0,1,0), Vector(0,0,0), self.tool.Diameter / 2.0)
         self.cutTool.Shape = Part.makeSolid(toolProf.revolve(Vector(0,0,0), Vector(0,0,1)))
