@@ -118,10 +118,9 @@ class PathSimulation:
         if self.icmd >= len(self.operation.Path.Commands):
             #self.cutMaterial.Shape = self.stock.removeSplitter()
             self.ioperation = self.ioperation + 1
-            if self.ioperation >= len(self.job.OutList):
+            if self.ioperation >= len(self.job.Operations.OutList):
                 self.timer.stop()
                 self.dialog.hide()
-                self.busy = False
                 return
             else:
                 self.UpdateOperation(self.ioperation)
