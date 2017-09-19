@@ -1,8 +1,28 @@
+import os
+_filePath = os.path.dirname(os.path.abspath(__file__))
+
 import Path
 import math
 from FreeCAD import Vector, Base
 from PathScripts.PathGeom import PathGeom
 from PySide import QtGui, QtCore
+
+#compiled with pyrcc4 -py3 Resources\CAM_Sim.qrc -o CAM_Sim_rc.py
+import CAM_Sim_rc
+       
+class CAMSimTaskUi:
+    def __init__(self, parent):
+        # this will create a Qt widget from our ui file
+        self.form = FreeCADGui.PySideUic.loadUi(_filePath + "/CAM_SimTask.ui")
+        self.parent = parent
+
+    def accept(self):
+        self.parent.accept()
+        FreeCADGui.Control.closeDialog()
+
+    def reject(self):
+        self.parent.cancel()
+        FreeCADGui.Control.closeDialog()
 
 #for cmd in obj.Path.Commands:
 #	if cmd.Name[0] == 'G':
@@ -18,80 +38,105 @@ class PathSimulation:
         self.timer = QtCore.QTimer()
         QtCore.QObject.connect(self.timer, QtCore.SIGNAL("timeout()"), self.PerformCut)
         self.stdrot = FreeCAD.Rotation(Vector(0,0,1),0)
-        # setup interaction dialog
-        self.dialog = QtGui.QDockWidget()
-        self.PlayButt = QtGui.QPushButton(self.dialog)
-        self.PlayButt.setText("Play")
-        self.PlayButt.move(50,5)
-        self.PlayButt.clicked.connect(self.PlayAnimation)
-        self.StepButt = QtGui.QPushButton(self.dialog)
-        self.StepButt.setText("Step")
-        self.StepButt.move(50,35)
-        self.StepButt.clicked.connect(self.PerformCut)
-        self.SkipButt = QtGui.QPushButton(self.dialog)
-        self.SkipButt.setText("Skip")
-        self.SkipButt.move(50,65)
-        self.SkipButt.clicked.connect(self.SkipStep)
-        self.dialog.setWindowTitle("CAM Simulation")
-        Gui.getMainWindow().addDockWidget(QtCore.Qt.RightDockWidgetArea, self.dialog)
-        self.dialog.setFloating(True)
-        self.dialog.hide()
-    
+
+        self.taskForm = CAMSimTaskUi(self)
+        form = self.taskForm.form
+        self.Connect(form.toolButtonStop, self.SimStop)
+        self.Connect(form.toolButtonPlay, self.SimPlay)
+        self.Connect(form.toolButtonPause, self.SimPause)
+        self.Connect(form.toolButtonStep, self.SimStep)
+        self.Connect(form.toolButtonFF, self.SimFF)
+        form.comboJobs.currentIndexChanged.connect(self.onJobChange)
+
+    def Connect(self, but, sig):
+        QtCore.QObject.connect(but, QtCore.SIGNAL("clicked()"), sig)
+
+    def UpdateProgress(self):
+        self.taskForm.form.progressBar.setValue(self.iprogress * 100 / self.numCommands)
+
+    def Activate(self):
+        form = self.taskForm.form
+        jobList = FreeCAD.ActiveDocument.findObjects("Path::FeaturePython", "Job.*")
+        form.comboJobs.clear()
+        self.jobs = []            
+        for j in jobList:
+            self.jobs.append(j)
+            form.comboJobs.addItem(j.ViewObject.Icon, j.Label)
+        FreeCADGui.Control.showDialog(self.taskForm)
+        self.disableAnim = False
+        self.SimulateMill()
+
+    def SetupSimulation(self):
+        form = self.taskForm.form       
+        self.activeOps = []
+        self.numCommands = 0
+        for i in range(form.listOperations.count()):
+            if form.listOperations.item(i).checkState() == QtCore.Qt.CheckState.Checked:
+                self.activeOps.append(self.operations[i])
+                self.numCommands += len(self.operations[i].Path.Commands)
+        if len(self.activeOps) == 0:
+            return 0
+        self.stock = self.job.Stock.Shape
+        self.cutMaterial.Shape = self.stock
+        self.busy = False
+        self.SetupOperation(0)
+        self.iprogress = 0
+        self.UpdateProgress()
+
+    def SetupOperation(self, itool):
+        self.operation = self.activeOps[itool]
+        self.tool = self.operation.ToolController.Tool
+        toolProf = self.CreateToolProfile(self.tool, Vector(0,1,0), Vector(0,0,0), self.tool.Diameter / 2.0)
+        self.cutTool.Shape = Part.makeSolid(toolProf.revolve(Vector(0,0,0), Vector(0,0,1)))
+        self.cutTool.ViewObject.show()
+        self.icmd = 0
+        self.curpos = self.initialPos
+        self.cutTool.Placement = FreeCAD.Placement(self.curpos, self.stdrot)
+       
+
     def SimulateMill(self):
-        sel = Gui.Selection.getSelectionEx()
-        job = None
-        if len(sel) == 1:
-            sel = sel[0]
-            job = sel.Object
-        if job == None or not hasattr(job, "Path") or not hasattr(job, "ToolController") or not hasattr(job, "Stock"):
-            return TSError("Please first select a Path Job")
-        if job.Stock == None:
-            return TSError("Please configure a stock for the path Job")
-        self.job = job
-        self.stock = job.Stock.Shape
+        self.job = self.jobs[self.taskForm.form.comboJobs.currentIndex()]
         self.busy = False
         #self.timer.start(100)
         self.ioperation = 0
         self.height = 10
         self.skipStep = False
+        self.initialPos = Vector(0, 0, self.job.Stock.Shape.BoundBox.ZMax)
         # Add cut tool
         self.cutTool = FreeCAD.ActiveDocument.addObject("Part::FeaturePython","CutTool")
-        self.UpdateOperation(0)
-        self.cutTool.Placement = FreeCAD.Placement(self.curpos, self.stdrot)
         self.cutTool.ViewObject.Proxy = 0
-        self.cutTool.ViewObject.show()
+        self.cutTool.ViewObject.hide()
+
         # Add cut material
         self.cutMaterial = FreeCAD.ActiveDocument.addObject("Part::FeaturePython","CutMaterial")
-        self.cutMaterial.Shape = self.stock
+        self.cutMaterial.Shape = self.job.Stock.Shape
         self.cutMaterial.ViewObject.Proxy = 0
         self.cutMaterial.ViewObject.show()
+
         # Add cut path solid for debug
         if self.debug:
             self.cutSolid = FreeCAD.ActiveDocument.addObject("Part::FeaturePython","CutDebug")
-            self.cutSolid.Shape = self.stock
             self.cutSolid.ViewObject.Proxy = 0
             self.cutSolid.ViewObject.hide()
         
         FreeCAD.ActiveDocument.recompute()
-        self.dialog.show()
+        self.resetSimulation = True
+        #self.dialog.show()
 
     def SkipStep(self):
         self.skipStep = True
         self.PerformCut()
 
-    def UpdateOperation(self, itool):
-        self.operation = self.job.Operations.OutList[itool]
-        self.tool = self.operation.ToolController.Tool
-        toolProf = self.CreateToolProfile(self.tool, Vector(0,1,0), Vector(0,0,0), self.tool.Diameter / 2.0)
-        self.cutTool.Shape = Part.makeSolid(toolProf.revolve(Vector(0,0,0), Vector(0,0,1)))
-        self.icmd = 0
-        self.curpos = Vector(0, 0, self.stock.BoundBox.ZMax)
-       
 
     def PerformCut(self):
+        if self.resetSimulation:
+            self.resetSimulation = False
+            self.SetupSimulation()
+
         if self.busy:
             return
         self.busy = True
+
         cmd = self.operation.Path.Commands[self.icmd]
         #for cmd in job.Path.Commands:
         pathSolid = None
@@ -113,18 +158,21 @@ class PathSimulation:
             except:
                 if self.debug:
                     print "invalid cut at cmd #" + str(self.icmd)
-        self.cutTool.Placement = FreeCAD.Placement(self.curpos, self.stdrot)
-        self.icmd = self.icmd + 1
+        if not self.disableAnim:
+            self.cutTool.Placement = FreeCAD.Placement(self.curpos, self.stdrot)
+        self.icmd += 1
+        self.iprogress += 1
+        self.UpdateProgress()
         if self.icmd >= len(self.operation.Path.Commands):
             #self.cutMaterial.Shape = self.stock.removeSplitter()
-            self.ioperation = self.ioperation + 1
-            if self.ioperation >= len(self.job.Operations.OutList):
-                self.timer.stop()
-                self.dialog.hide()
+            self.ioperation += 1
+            if self.ioperation >= len(self.activeOps):
+                self.EndSimulation()
                 return
             else:
-                self.UpdateOperation(self.ioperation)
-        self.cutMaterial.Shape = self.stock
+                self.SetupOperation(self.ioperation)
+        if not self.disableAnim:
+            self.cutMaterial.Shape = self.stock
         self.busy = False
     
     def RapidMove(self, cmd, curpos):
@@ -276,16 +324,83 @@ class PathSimulation:
             lB = Part.makeLine(vBC, vBR)
             res = Part.Wire([lB, lR, lT])
 
-        return res
+        return res  
+
+    def onJobChange(self):
+        form = self.taskForm.form
+        j = self.jobs[form.comboJobs.currentIndex()]
+        form.listOperations.clear()
+        self.operations = []
+        for op in j.Operations.OutList:
+            listItem = QtGui.QListWidgetItem(op.ViewObject.Icon, op.Label) 
+            listItem.setFlags(listItem.flags() | QtCore.Qt.ItemIsUserCheckable)
+            listItem.setCheckState(QtCore.Qt.CheckState.Checked)
+            self.operations.append(op)
+            form.listOperations.addItem(listItem)
+
+    def GuiBusy(self, isBusy):
+        form = self.taskForm.form
+        #form.toolButtonStop.setEnabled()
+        form.toolButtonPlay.setEnabled(not isBusy)
+        form.toolButtonPause.setEnabled(isBusy)
+        form.toolButtonStep.setEnabled(not isBusy)
+        form.toolButtonFF.setEnabled(not isBusy)
+
+    def EndSimulation(self):
+        self.UpdateProgress()
+        self.timer.stop()
+        self.GuiBusy(False)
+        self.cutMaterial.Shape = self.stock
+        self.resetSimulation = True
+
+    def SimStop(self):
+        self.cutTool.ViewObject.hide()
+        self.iprogress = 0
+        self.EndSimulation()
+
+    def SimFF(self):
+        self.GuiBusy(True)
+        self.timer.start(50)
+        self.disableAnim = True
+
+    def SimStep(self):
+        self.disableAnim = False
+        self.PerformCut()
+
+    def SimPlay(self):
+        self.disableAnim = False
+        self.GuiBusy(True)
+        self.timer.start(100)
+
+    def SimPause(self):
+        if self.disableAnim:
+            self.cutMaterial.Shape = self.stock
+        self.GuiBusy(False)
+        self.timer.stop()
+
+    def RemoveTool(self):
+        if self.cutTool is None:
+            return
+        FreeCAD.ActiveDocument.removeObject(self.cutTool.Name)
+        self.cutTool = None
+
+    def RemoveMaterial(self):
+        if self.cutMaterial is None:
+            return
+        FreeCAD.ActiveDocument.removeObject(self.cutMaterial.Name)
+        self.cutMaterial = None
         
 
-    def PlayAnimation(self):
-        if self.PlayButt.text() == "Pause":
-            self.PlayButt.setText("Play")
-            self.timer.stop()
-        else:
-            self.PlayButt.setText("Pause")
-            self.timer.start(100)
+    def accept(self):
+        self.EndSimulation()
+        self.RemoveTool()
+        
+    def cancel(self):
+        self.EndSimulation()
+        self.RemoveTool()
+        self.RemoveMaterial()
+        
+
 
 simul = PathSimulation()
-simul.SimulateMill()
+simul.Activate()

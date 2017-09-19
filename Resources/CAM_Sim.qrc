@@ -1,0 +1,9 @@
+<RCC>
+  <qresource prefix="Icons">
+    <file>BPlay.svg</file>
+    <file>BFastForward.svg</file>
+    <file>BPause.svg</file>
+    <file>BStep.svg</file>
+    <file>BStop.svg</file>
+  </qresource>
+</RCC>
