@@ -2,6 +2,7 @@ import os
 _filePath = os.path.dirname(os.path.abspath(__file__))
 
 import Path
+import PathSimulator
 import math
 from FreeCAD import Vector, Base
 from PathScripts.PathGeom import PathGeom
@@ -64,6 +65,8 @@ class PathSimulation:
             form.comboJobs.addItem(j.ViewObject.Icon, j.Label)
         FreeCADGui.Control.showDialog(self.taskForm)
         self.disableAnim = False
+        self.isVoxel = True
+        self.voxSim = PathSimulator.PathSim()
         self.SimulateMill()
 
     def SetupSimulation(self):
@@ -77,7 +80,11 @@ class PathSimulation:
         if len(self.activeOps) == 0:
             return 0
         self.stock = self.job.Stock.Shape
-        self.cutMaterial.Shape = self.stock
+        if (self.isVoxel):
+            self.voxSim.BeginSimulation(self.stock,0.5)
+            self.cutMaterial.Mesh = self.voxSim.GetResultMesh()
+        else:
+            self.cutMaterial.Shape = self.stock
         self.busy = False
         self.SetupOperation(0)
         self.iprogress = 0
@@ -89,9 +96,11 @@ class PathSimulation:
         toolProf = self.CreateToolProfile(self.tool, Vector(0,1,0), Vector(0,0,0), self.tool.Diameter / 2.0)
         self.cutTool.Shape = Part.makeSolid(toolProf.revolve(Vector(0,0,0), Vector(0,0,1)))
         self.cutTool.ViewObject.show()
+        self.voxSim.SetCurrentTool(self.tool)
         self.icmd = 0
-        self.curpos = self.initialPos
-        self.cutTool.Placement = FreeCAD.Placement(self.curpos, self.stdrot)
+        self.curpos = FreeCAD.Placement(self.initialPos, self.stdrot)
+        #self.cutTool.Placement = FreeCAD.Placement(self.curpos, self.stdrot)
+        self.cutTool.Placement = self.curpos
        
 
     def SimulateMill(self):
@@ -108,8 +117,11 @@ class PathSimulation:
         self.cutTool.ViewObject.hide()
 
         # Add cut material
-        self.cutMaterial = FreeCAD.ActiveDocument.addObject("Part::FeaturePython","CutMaterial")
-        self.cutMaterial.Shape = self.job.Stock.Shape
+        if self.isVoxel:
+            self.cutMaterial = FreeCAD.ActiveDocument.addObject("Mesh::FeaturePython","CutMaterial")
+        else:
+            self.cutMaterial = FreeCAD.ActiveDocument.addObject("Part::FeaturePython","CutMaterial")
+            self.cutMaterial.Shape = self.job.Stock.Shape
         self.cutMaterial.ViewObject.Proxy = 0
         self.cutMaterial.ViewObject.show()
 
@@ -128,7 +140,7 @@ class PathSimulation:
         self.PerformCut()
 
 
-    def PerformCut(self):
+    def PerformCutBoolean(self):
         if self.resetSimulation:
             self.resetSimulation = False
             self.SetupSimulation()
@@ -175,12 +187,47 @@ class PathSimulation:
             self.cutMaterial.Shape = self.stock
         self.busy = False
     
+    def PerformCutVoxel(self):
+        if self.resetSimulation:
+            self.resetSimulation = False
+            self.SetupSimulation()
+
+        if self.busy:
+            return
+        self.busy = True
+
+        cmd = self.operation.Path.Commands[self.icmd]
+        #for cmd in job.Path.Commands:
+        if cmd.Name in ['G0', 'G1', 'G2', 'G3']:
+            self.curpos = self.voxSim.ApplyCommand(self.curpos, cmd)
+            if not self.disableAnim:
+                self.cutTool.Placement = self.curpos #FreeCAD.Placement(self.curpos, self.stdrot)
+                self.cutMaterial.Mesh = self.voxSim.GetResultMesh()
+        self.icmd += 1
+        self.iprogress += 1
+        self.UpdateProgress()
+        if self.icmd >= len(self.operation.Path.Commands):
+            #self.cutMaterial.Shape = self.stock.removeSplitter()
+            self.ioperation += 1
+            if self.ioperation >= len(self.activeOps):
+                self.EndSimulation()
+                return
+            else:
+                self.SetupOperation(self.ioperation)
+        self.busy = False
+
+    def PerformCut(self):
+        if (self.isVoxel):
+            self.PerformCutVoxel()
+        else:
+            self.PerformCutBoolean()
+        
     def RapidMove(self, cmd, curpos):
         path = PathGeom.edgeForCmd(cmd, curpos) # hack to overcome occ bug
         if path is None:
             return curpos
         return path.valueAt(path.LastParameter)
-    
+
     def GetPathSolidOld(self, tool, cmd, curpos):
         e1 = PathGeom.edgeForCmd(cmd, curpos)
         #curpos = e1.valueAt(e1.LastParameter)
@@ -360,7 +407,7 @@ class PathSimulation:
 
     def SimFF(self):
         self.GuiBusy(True)
-        self.timer.start(50)
+        self.timer.start(10)
         self.disableAnim = True
 
     def SimStep(self):
@@ -370,7 +417,7 @@ class PathSimulation:
     def SimPlay(self):
         self.disableAnim = False
         self.GuiBusy(True)
-        self.timer.start(100)
+        self.timer.start(20)
 
     def SimPause(self):
         if self.disableAnim:
