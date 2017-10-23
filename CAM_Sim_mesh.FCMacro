@@ -397,7 +397,7 @@ class PathSimulation:
         self.UpdateProgress()
         self.timer.stop()
         self.GuiBusy(False)
-        self.cutMaterial.Shape = self.stock
+        self.ViewShape()
         self.resetSimulation = True
 
     def SimStop(self):
@@ -419,9 +419,15 @@ class PathSimulation:
         self.GuiBusy(True)
         self.timer.start(20)
 
+    def ViewShape(self):
+        if self.isVoxel:
+            self.cutMaterial.Mesh = self.voxSim.GetResultMesh()
+        else:
+            self.cutMaterial.Shape = self.stock
+
     def SimPause(self):
         if self.disableAnim:
-            self.cutMaterial.Shape = self.stock
+            self.ViewShape()
         self.GuiBusy(False)
         self.timer.stop()
 
